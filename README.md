@@ -9,6 +9,10 @@ Right half of the window: Steep parallax occlusion mapping with optional self-sh
 
 It visualizes the visual and performance differences between the two techniques using a textured quad and height/bump maps.
 
+<img width="1917" height="1030" alt="image" src="https://github.com/user-attachments/assets/869166a6-defd-403c-bbfe-2e4e7bec983d" />
+<img width="1917" height="1030" alt="image" src="https://github.com/user-attachments/assets/a7b63e33-e107-4548-96dc-de9686f4fa28" />
+<img width="1917" height="1030" alt="image" src="https://github.com/user-attachments/assets/26e20f53-9907-471e-a82d-edb845e54c16" />
+
 Background
 ---------------------------------------
 Parallax Mapping is a real-time rendering technique that simulates depth on flat surfaces using height maps and UV offsetting, without increasing actual geometry.
