@@ -27,3 +27,6 @@ Release/vc143.pdb
 /freeglut
 /Debug
 /Release
+*.db-shm
+*.db-wal
+*.opendb
