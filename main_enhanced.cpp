@@ -28,8 +28,8 @@
     #pragma comment(lib, "freeglut.lib")
 #endif
 
-#include <GL/glew.h>
-#include <GL/glut.h>
+#include "GL/glew.h"
+#include "GL/glut.h"
 
 // Cross-platform image loading
 #ifdef _WIN32
@@ -38,6 +38,9 @@
     // We'll implement a simple BMP loader for Linux
     typedef unsigned char BYTE;
 #endif
+
+#undef min
+#undef max
 
 // === CONFIGURATION AND GLOBALS ===
 
@@ -796,60 +799,96 @@ static void bindUniforms(GLuint prog) {
 
 static void Handle_Display() {
     updatePerformance();
-    
+
+    // Defensive: Check OpenGL context and lights vector
+    if (lights.empty()) {
+        std::cerr << "Error: No lights available!" << std::endl;
+        return;
+    }
+
+    // Defensive: Check VAO
+    if (VAO == 0) {
+        std::cerr << "Error: VAO not initialized!" << std::endl;
+        return;
+    }
+
+    // Defensive: Check OpenGL error before rendering
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        std::cerr << "OpenGL error before rendering: " << err << std::endl;
+        return;
+    }
+
+    // Defensive: Check shader program
+    if (shaderPrograms.empty()) {
+        std::cerr << "Error: No shader programs loaded!" << std::endl;
+        return;
+    }
+
+    // Defensive: Check texture IDs
+    if (texture_id == 0 || bumpTexture_id == 0 || normalTexture_id == 0) {
+        std::cerr << "Error: One or more textures not loaded!" << std::endl;
+        return;
+    }
+
     // Auto-rotate camera
     if (features.autoRotate) {
         camera_rotate_angle += 0.5f;
     }
-    
+
     // Clamp light position
     lights[0].position[0] = clamp(lights[0].position[0], -10.0f, 10.0f);
     lights[0].position[1] = clamp(lights[0].position[1], -10.0f, 10.0f);
     lights[0].position[2] = clamp(lights[0].position[2], 2.0f, 20.0f);
-    
+
     // Enable/disable multisampling
     if (features.multisampling) {
         glEnable(GL_MULTISAMPLE);
     } else {
         glDisable(GL_MULTISAMPLE);
     }
-    
+
     // Enable/disable wireframe
     if (features.wireframeMode) {
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
     } else {
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     }
-    
+
     // Clear buffers
     glClearColor(0.1f, 0.1f, 0.15f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    
+
     // Enable scissor for split-screen
     glEnable(GL_SCISSOR_TEST);
-    
+
     int halfW = screenWidth / 2;
     int squareW = (screenHeight < halfW ? screenHeight : halfW);
-    
+
     // === LEFT SIDE: Basic Parallax ===
     int leftX = halfW - squareW;
     glViewport(leftX, 0, squareW, squareW);
     glScissor(leftX, 0, squareW, squareW);
-    
+
     // Setup camera
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
     gluLookAt(0, 0, 35, 0, 0, 0, 0, 1, 0);
-    
+
     // Transform light to eye space
     float MV0[16];
     glGetFloatv(GL_MODELVIEW_MATRIX, MV0);
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        std::cerr << "OpenGL error after glGetFloatv(GL_MODELVIEW_MATRIX): " << err << std::endl;
+        return;
+    }
     float lightEye[3] = {
         MV0[0] * lights[0].position[0] + MV0[4] * lights[0].position[1] + MV0[8] * lights[0].position[2] + MV0[12],
         MV0[1] * lights[0].position[0] + MV0[5] * lights[0].position[1] + MV0[9] * lights[0].position[2] + MV0[13],
         MV0[2] * lights[0].position[0] + MV0[6] * lights[0].position[1] + MV0[10] * lights[0].position[2] + MV0[14]
     };
-    
+
     // Draw light marker
     glUseProgram(0);
     glPushMatrix();
@@ -857,19 +896,19 @@ static void Handle_Display() {
     glColor3f(lights[0].color[0], lights[0].color[1], lights[0].color[2]);
     glutSolidSphere(0.5f, 16, 16);
     glPopMatrix();
-    
+
     // Rotate quad
     glLoadMatrixf(MV0);
     glRotatef(camera_elevate_angle, 1, 0, 0);
     glRotatef(camera_rotate_angle, 0, 1, 0);
-    
+
     // Build matrices
     float MV[16], PM[16], MVP[16], invMV[16];
     glGetFloatv(GL_MODELVIEW_MATRIX, MV);
     glGetFloatv(GL_PROJECTION_MATRIX, PM);
     multiply4x4(PM, MV, MVP);
     invertRigid(MV, invMV);
-    
+
     // Render with basic shader
     if (shaderPrograms.find("basic") != shaderPrograms.end()) {
         GLuint prog = shaderPrograms["basic"];
@@ -893,6 +932,11 @@ static void Handle_Display() {
     
     // Recompute light in eye space
     glGetFloatv(GL_MODELVIEW_MATRIX, MV0);
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        std::cerr << "OpenGL error after glGetFloatv(GL_MODELVIEW_MATRIX) (right): " << err << std::endl;
+        return;
+    }
     lightEye[0] = MV0[0] * lights[0].position[0] + MV0[4] * lights[0].position[1] + MV0[8] * lights[0].position[2] + MV0[12];
     lightEye[1] = MV0[1] * lights[0].position[0] + MV0[5] * lights[0].position[1] + MV0[9] * lights[0].position[2] + MV0[13];
     lightEye[2] = MV0[2] * lights[0].position[0] + MV0[6] * lights[0].position[1] + MV0[10] * lights[0].position[2] + MV0[14];
