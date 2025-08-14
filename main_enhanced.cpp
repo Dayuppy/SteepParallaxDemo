@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <csignal>  // For signal handling
 
 #ifndef _WIN32
     #include <unistd.h>  // For getcwd on Linux
@@ -139,16 +140,72 @@ constexpr T clamp(T v, T lo, T hi) {
     return (v < lo) ? lo : (v > hi) ? hi : v;
 }
 
+// Enhanced OpenGL error checking
+static bool checkGLError(const char* operation) {
+    GLenum error = glGetError();
+    if (error != GL_NO_ERROR) {
+        std::cerr << "OpenGL Error in " << operation << ": ";
+        switch (error) {
+            case GL_INVALID_ENUM:
+                std::cerr << "GL_INVALID_ENUM"; break;
+            case GL_INVALID_VALUE:
+                std::cerr << "GL_INVALID_VALUE"; break;
+            case GL_INVALID_OPERATION:
+                std::cerr << "GL_INVALID_OPERATION"; break;
+            case GL_OUT_OF_MEMORY:
+                std::cerr << "GL_OUT_OF_MEMORY"; break;
+            case GL_INVALID_FRAMEBUFFER_OPERATION:
+                std::cerr << "GL_INVALID_FRAMEBUFFER_OPERATION"; break;
+            default:
+                std::cerr << "Unknown error " << error; break;
+        }
+        std::cerr << " (" << error << ")" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Frame rate limiter to prevent overwhelming the system
+static void limitFrameRate() {
+    static auto lastFrameTime = std::chrono::high_resolution_clock::now();
+    static const auto targetFrameTime = std::chrono::microseconds(16667); // ~60 FPS
+    
+    auto currentTime = std::chrono::high_resolution_clock::now();
+    auto elapsed = currentTime - lastFrameTime;
+    
+    if (elapsed < targetFrameTime) {
+        auto sleepTime = targetFrameTime - elapsed;
+        std::this_thread::sleep_for(sleepTime);
+    }
+    
+    lastFrameTime = std::chrono::high_resolution_clock::now();
+}
+
 static void updatePerformance() {
     auto currentTime = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - perf.lastTime);
     perf.frameTime = duration.count() / 1000.0f; // Convert to milliseconds
+    
+    // Prevent division by zero and invalid frame times
+    if (perf.frameTime <= 0.0f) {
+        perf.frameTime = 0.016f; // Default to ~60 FPS
+    }
+    
     perf.fps = 1000.0f / perf.frameTime;
     
-    // Update averages
+    // Update averages with overflow protection
     perf.frameCount++;
-    if (perf.frameCount > 1) {
-        perf.avgFrameTime = (perf.avgFrameTime * (perf.frameCount - 1) + perf.frameTime) / perf.frameCount;
+    
+    // Reset counter every 10000 frames to prevent overflow
+    if (perf.frameCount > 10000) {
+        perf.frameCount = 1;
+        perf.avgFrameTime = perf.frameTime;
+        perf.minFrameTime = perf.frameTime;
+        perf.maxFrameTime = perf.frameTime;
+    } else if (perf.frameCount > 1) {
+        // Use exponential moving average to prevent precision loss
+        float alpha = 0.1f; // Smoothing factor
+        perf.avgFrameTime = alpha * perf.frameTime + (1.0f - alpha) * perf.avgFrameTime;
         perf.minFrameTime = std::min(perf.minFrameTime, perf.frameTime);
         perf.maxFrameTime = std::max(perf.maxFrameTime, perf.frameTime);
     } else {
@@ -528,11 +585,70 @@ static void Handle_Reshape(int w, int h);
 static void Handle_Mouse(int button, int state, int x, int y);
 static void Handle_Motion(int x, int y);
 
+static void cleanupResources() {
+    std::cout << "Cleaning up resources..." << std::endl;
+    
+    // Clean up textures
+    if (texture_id != 0) {
+        glDeleteTextures(1, &texture_id);
+        texture_id = 0;
+    }
+    if (bumpTexture_id != 0) {
+        glDeleteTextures(1, &bumpTexture_id);
+        bumpTexture_id = 0;
+    }
+    if (normalTexture_id != 0) {
+        glDeleteTextures(1, &normalTexture_id);
+        normalTexture_id = 0;
+    }
+    
+    // Clean up shaders
+    for (auto& pair : shaderPrograms) {
+        if (pair.second != 0) {
+            glDeleteProgram(pair.second);
+        }
+    }
+    shaderPrograms.clear();
+    
+    // Clean up geometry
+    if (VBO != 0) {
+        glDeleteBuffers(1, &VBO);
+        VBO = 0;
+    }
+    if (VAO != 0) {
+        glDeleteVertexArrays(1, &VAO);
+        VAO = 0;
+    }
+    
+    // Clean up image data
+    if (image_data) {
+        delete[] image_data;
+        image_data = nullptr;
+    }
+    
+    std::cout << "Resource cleanup complete!" << std::endl;
+}
+
+// Signal handler for clean exit
+void signalHandler(int signal) {
+    std::cout << "\nReceived signal " << signal << ", cleaning up..." << std::endl;
+    cleanupResources();
+    exit(signal);
+}
+
 // === MAIN FUNCTION ===
 
 int main(int argc, char* argv[]) {
     std::cout << "Enhanced Steep Parallax Mapping Demo" << std::endl;
     std::cout << "=====================================" << std::endl;
+    
+    // Register cleanup handlers
+    std::atexit(cleanupResources);
+    std::signal(SIGINT, signalHandler);
+    std::signal(SIGTERM, signalHandler);
+#ifdef _WIN32
+    std::signal(SIGBREAK, signalHandler);
+#endif
     
     // Print working directory
     char cwd[1024];
@@ -551,28 +667,65 @@ int main(int argc, char* argv[]) {
     
     // Initialize GLEW
     glewExperimental = GL_TRUE;
-    if (glewInit() != GLEW_OK) {
-        std::cerr << "ERROR: glewInit failed" << std::endl;
+    GLenum glewResult = glewInit();
+    if (glewResult != GLEW_OK) {
+        std::cerr << "ERROR: glewInit failed: " << glewGetErrorString(glewResult) << std::endl;
         return 1;
     }
+    
+    // Clear any OpenGL errors that may have been generated by glewInit
+    while (glGetError() != GL_NO_ERROR) {}
     
     std::cout << "OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
     std::cout << "GLSL Version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << std::endl;
     std::cout << "GPU: " << glGetString(GL_RENDERER) << std::endl;
     
-    // Enable OpenGL features
+    // Enable OpenGL features with error checking
     glEnable(GL_DEPTH_TEST);
+    if (!checkGLError("Enabling depth test")) return 1;
+    
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    if (!checkGLError("Enabling blending")) return 1;
     
     // Initialize performance tracking
     perf.lastTime = std::chrono::high_resolution_clock::now();
     
-    // Initialize subsystems
-    initTextures();
-    initShaders();
-    initGeometry();
-    initLights();
+    // Initialize subsystems with validation
+    std::cout << "Initializing subsystems..." << std::endl;
+    
+    try {
+        initTextures();
+        if (!checkGLError("Texture initialization")) return 1;
+        
+        initShaders();
+        if (!checkGLError("Shader initialization")) return 1;
+        
+        initGeometry();
+        if (!checkGLError("Geometry initialization")) return 1;
+        
+        initLights();
+        
+        // Validate that all critical resources are loaded
+        if (shaderPrograms.empty()) {
+            std::cerr << "ERROR: No shaders loaded successfully!" << std::endl;
+            return 1;
+        }
+        
+        if (texture_id == 0 || bumpTexture_id == 0 || normalTexture_id == 0) {
+            std::cerr << "ERROR: Failed to load required textures!" << std::endl;
+            return 1;
+        }
+        
+        if (VAO == 0 || VBO == 0) {
+            std::cerr << "ERROR: Failed to create geometry buffers!" << std::endl;
+            return 1;
+        }
+        
+    } catch (const std::exception& e) {
+        std::cerr << "ERROR during initialization: " << e.what() << std::endl;
+        return 1;
+    }
     
     // Set up GLUT callbacks
     glutDisplayFunc(Handle_Display);
@@ -583,11 +736,14 @@ int main(int argc, char* argv[]) {
     glutIdleFunc(Handle_Display);
     
     std::cout << "\nInitialization complete!" << std::endl;
+    std::cout << "Loaded " << shaderPrograms.size() << " shader programs" << std::endl;
     std::cout << "Press 'H' for help, 'Q' to quit" << std::endl;
     
-    // Main loop
+    // Main loop - this should never return
     glutMainLoop();
     
+    // If we somehow get here, clean up and exit
+    cleanupResources();
     return 0;
 }
 
@@ -596,6 +752,7 @@ int main(int argc, char* argv[]) {
 static void Handle_Keyboard(unsigned char key, int, int) {
     switch (key) {
         case 'q': case 'Q': case 27: // Quit
+            cleanupResources();
             exit(0);
             break;
             
@@ -709,9 +866,15 @@ static void Handle_Motion(int x, int y) {
 // === RENDERING ===
 
 static void bindUniforms(GLuint prog) {
-    glUseProgram(prog);
+    if (prog == 0) {
+        std::cerr << "Warning: Invalid shader program in bindUniforms" << std::endl;
+        return;
+    }
     
-    // Get uniform locations
+    glUseProgram(prog);
+    if (!checkGLError("glUseProgram in bindUniforms")) return;
+    
+    // Get uniform locations (these may return -1 if not found, which is okay)
     GLint uMVP = glGetUniformLocation(prog, "ModelViewProj");
     GLint uMVI = glGetUniformLocation(prog, "ModelViewI");
     GLint uLight = glGetUniformLocation(prog, "lightPosition");
@@ -798,8 +961,14 @@ static void bindUniforms(GLuint prog) {
 }
 
 static void Handle_Display() {
+    // Frame rate limiting to prevent overwhelming the system
+    limitFrameRate();
+    
     updatePerformance();
 
+    // Comprehensive error checking and validation
+    if (!checkGLError("Display function start")) return;
+    
     // Defensive: Check OpenGL context and lights vector
     if (lights.empty()) {
         std::cerr << "Error: No lights available!" << std::endl;
@@ -809,13 +978,6 @@ static void Handle_Display() {
     // Defensive: Check VAO
     if (VAO == 0) {
         std::cerr << "Error: VAO not initialized!" << std::endl;
-        return;
-    }
-
-    // Defensive: Check OpenGL error before rendering
-    GLenum err = glGetError();
-    if (err != GL_NO_ERROR) {
-        std::cerr << "OpenGL error before rendering: " << err << std::endl;
         return;
     }
 
@@ -878,24 +1040,25 @@ static void Handle_Display() {
     // Transform light to eye space
     float MV0[16];
     glGetFloatv(GL_MODELVIEW_MATRIX, MV0);
-    err = glGetError();
-    if (err != GL_NO_ERROR) {
-        std::cerr << "OpenGL error after glGetFloatv(GL_MODELVIEW_MATRIX): " << err << std::endl;
-        return;
-    }
+    if (!checkGLError("glGetFloatv(GL_MODELVIEW_MATRIX)")) return;
+    
     float lightEye[3] = {
         MV0[0] * lights[0].position[0] + MV0[4] * lights[0].position[1] + MV0[8] * lights[0].position[2] + MV0[12],
         MV0[1] * lights[0].position[0] + MV0[5] * lights[0].position[1] + MV0[9] * lights[0].position[2] + MV0[13],
         MV0[2] * lights[0].position[0] + MV0[6] * lights[0].position[1] + MV0[10] * lights[0].position[2] + MV0[14]
     };
 
-    // Draw light marker
+    // Draw light marker with error checking
     glUseProgram(0);
+    if (!checkGLError("glUseProgram(0)")) return;
+    
     glPushMatrix();
     glTranslatef(lights[0].position[0], lights[0].position[1], lights[0].position[2]);
     glColor3f(lights[0].color[0], lights[0].color[1], lights[0].color[2]);
     glutSolidSphere(0.5f, 16, 16);
     glPopMatrix();
+    
+    if (!checkGLError("Light marker rendering")) return;
 
     // Rotate quad
     glLoadMatrixf(MV0);
@@ -906,18 +1069,31 @@ static void Handle_Display() {
     float MV[16], PM[16], MVP[16], invMV[16];
     glGetFloatv(GL_MODELVIEW_MATRIX, MV);
     glGetFloatv(GL_PROJECTION_MATRIX, PM);
+    if (!checkGLError("Matrix operations")) return;
     multiply4x4(PM, MV, MVP);
     invertRigid(MV, invMV);
 
     // Render with basic shader
     if (shaderPrograms.find("basic") != shaderPrograms.end()) {
         GLuint prog = shaderPrograms["basic"];
-        bindUniforms(prog);
-        glUniformMatrix4fv(glGetUniformLocation(prog, "ModelViewProj"), 1, GL_FALSE, MVP);
-        glUniformMatrix4fv(glGetUniformLocation(prog, "ModelViewI"), 1, GL_FALSE, invMV);
-        glUniform3fv(glGetUniformLocation(prog, "lightPosition"), 1, lightEye);
-        glBindVertexArray(VAO);
-        glDrawArrays(GL_QUADS, 0, 4);
+        if (prog != 0) {
+            bindUniforms(prog);
+            
+            // Safely bind matrix uniforms
+            GLint mvpLoc = glGetUniformLocation(prog, "ModelViewProj");
+            GLint mviLoc = glGetUniformLocation(prog, "ModelViewI");
+            GLint lightLoc = glGetUniformLocation(prog, "lightPosition");
+            
+            if (mvpLoc >= 0) glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, MVP);
+            if (mviLoc >= 0) glUniformMatrix4fv(mviLoc, 1, GL_FALSE, invMV);
+            if (lightLoc >= 0) glUniform3fv(lightLoc, 1, lightEye);
+            
+            glBindVertexArray(VAO);
+            if (!checkGLError("Binding VAO for basic shader")) return;
+            
+            glDrawArrays(GL_QUADS, 0, 4);
+            if (!checkGLError("Drawing basic shader")) return;
+        }
     }
     
     // === RIGHT SIDE: Enhanced Steep Parallax ===
@@ -932,11 +1108,7 @@ static void Handle_Display() {
     
     // Recompute light in eye space
     glGetFloatv(GL_MODELVIEW_MATRIX, MV0);
-    err = glGetError();
-    if (err != GL_NO_ERROR) {
-        std::cerr << "OpenGL error after glGetFloatv(GL_MODELVIEW_MATRIX) (right): " << err << std::endl;
-        return;
-    }
+    if (!checkGLError("glGetFloatv(GL_MODELVIEW_MATRIX) right side")) return;
     lightEye[0] = MV0[0] * lights[0].position[0] + MV0[4] * lights[0].position[1] + MV0[8] * lights[0].position[2] + MV0[12];
     lightEye[1] = MV0[1] * lights[0].position[0] + MV0[5] * lights[0].position[1] + MV0[9] * lights[0].position[2] + MV0[13];
     lightEye[2] = MV0[2] * lights[0].position[0] + MV0[6] * lights[0].position[1] + MV0[10] * lights[0].position[2] + MV0[14];
@@ -955,12 +1127,24 @@ static void Handle_Display() {
     // Render with current shader
     if (shaderPrograms.find(currentShader) != shaderPrograms.end()) {
         GLuint prog = shaderPrograms[currentShader];
-        bindUniforms(prog);
-        glUniformMatrix4fv(glGetUniformLocation(prog, "ModelViewProj"), 1, GL_FALSE, MVP);
-        glUniformMatrix4fv(glGetUniformLocation(prog, "ModelViewI"), 1, GL_FALSE, invMV);
-        glUniform3fv(glGetUniformLocation(prog, "lightPosition"), 1, lightEye);
-        glBindVertexArray(VAO);
-        glDrawArrays(GL_QUADS, 0, 4);
+        if (prog != 0) {
+            bindUniforms(prog);
+            
+            // Safely bind matrix uniforms
+            GLint mvpLoc = glGetUniformLocation(prog, "ModelViewProj");
+            GLint mviLoc = glGetUniformLocation(prog, "ModelViewI");
+            GLint lightLoc = glGetUniformLocation(prog, "lightPosition");
+            
+            if (mvpLoc >= 0) glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, MVP);
+            if (mviLoc >= 0) glUniformMatrix4fv(mviLoc, 1, GL_FALSE, invMV);
+            if (lightLoc >= 0) glUniform3fv(lightLoc, 1, lightEye);
+            
+            glBindVertexArray(VAO);
+            if (!checkGLError("Binding VAO for enhanced shader")) return;
+            
+            glDrawArrays(GL_QUADS, 0, 4);
+            if (!checkGLError("Drawing enhanced shader")) return;
+        }
     }
     
     // === Performance Overlay ===
@@ -991,10 +1175,26 @@ static void Handle_Display() {
         glMatrixMode(GL_MODELVIEW);
     }
     
-    // Cleanup
+    // Cleanup and final error check
     glDisable(GL_SCISSOR_TEST);
     glBindVertexArray(0);
+    glUseProgram(0);
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL); // Reset wireframe
     
+    // Final error check before buffer swap
+    if (!checkGLError("End of display function")) {
+        // If there's an error, try to recover by resetting OpenGL state
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindVertexArray(0);
+        glUseProgram(0);
+        glDisable(GL_SCISSOR_TEST);
+    }
+    
     glutSwapBuffers();
+    
+    // Periodic error check to prevent accumulation
+    static int errorCheckCounter = 0;
+    if (++errorCheckCounter % 300 == 0) { // Every ~5 seconds at 60 FPS
+        glGetError(); // Clear any pending errors
+    }
 }
