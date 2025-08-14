@@ -119,9 +119,14 @@ static std::vector<Light> lights;
 static GLuint texture_id = 0;
 static GLuint bumpTexture_id = 0;
 static GLuint normalTexture_id = 0;
-static BYTE* image_data = nullptr;
-static int image_width = 0;
-static int image_height = 0;
+
+// Separate image data for each texture to prevent heap corruption
+static BYTE* diffuse_data = nullptr;
+static BYTE* bump_data = nullptr;
+static BYTE* normal_data = nullptr;
+static int diffuse_width = 0, diffuse_height = 0;
+static int bump_width = 0, bump_height = 0;
+static int normal_width = 0, normal_height = 0;
 
 // Shader programs
 static std::unordered_map<std::string, GLuint> shaderPrograms;
@@ -443,16 +448,28 @@ static GLuint createShaderProgram(const char* vsFile, const char* fsFile) {
 static void initTextures() {
     std::cout << "Loading textures..." << std::endl;
     
-    // Load diffuse texture
-    if (BMP_Read("lion.bmp", &image_data, image_width, image_height)) {
+    // Clear any existing OpenGL errors before starting
+    while (glGetError() != GL_NO_ERROR) {}
+    
+    // Load diffuse texture - use separate buffer to prevent heap corruption
+    if (BMP_Read("lion.bmp", &diffuse_data, diffuse_width, diffuse_height) && diffuse_data != nullptr) {
         glGenTextures(1, &texture_id);
         glBindTexture(GL_TEXTURE_2D, texture_id);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, image_width, image_height, 0, GL_RGB, GL_UNSIGNED_BYTE, image_data);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, diffuse_width, diffuse_height, 0, GL_RGB, GL_UNSIGNED_BYTE, diffuse_data);
         glGenerateMipmap(GL_TEXTURE_2D);
+        
+        // CRITICAL: Force completion before proceeding to prevent driver corruption
+        glFinish();
+        
+        // Check for OpenGL errors after texture creation
+        if (!checkGLError("Diffuse texture creation")) {
+            std::cerr << "ERROR: Failed to create diffuse texture" << std::endl;
+            return;
+        }
         
         if (features.anisotropicFiltering) {
             float maxAniso;
@@ -460,34 +477,56 @@ static void initTextures() {
             glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, maxAniso);
         }
         
-        std::cout << "Loaded diffuse texture: " << image_width << "x" << image_height << std::endl;
+        std::cout << "Loaded diffuse texture: " << diffuse_width << "x" << diffuse_height << std::endl;
     }
     
-    // Load bump texture
-    if (BMP_Read("lion-bump.bmp", &image_data, image_width, image_height)) {
+    // Load bump texture - use separate buffer
+    if (BMP_Read("lion-bump.bmp", &bump_data, bump_width, bump_height) && bump_data != nullptr) {
         glGenTextures(1, &bumpTexture_id);
         glBindTexture(GL_TEXTURE_2D, bumpTexture_id);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, image_width, image_height, 0, GL_RGB, GL_UNSIGNED_BYTE, image_data);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, bump_width, bump_height, 0, GL_RGB, GL_UNSIGNED_BYTE, bump_data);
         glGenerateMipmap(GL_TEXTURE_2D);
+        
+        // CRITICAL: Force completion before proceeding
+        glFinish();
+        
+        // Check for OpenGL errors after texture creation
+        if (!checkGLError("Bump texture creation")) {
+            std::cerr << "ERROR: Failed to create bump texture" << std::endl;
+            return;
+        }
+        
         std::cout << "Loaded bump texture" << std::endl;
     }
     
-    // Load normal texture  
-    if (BMP_Read("lion-normal.bmp", &image_data, image_width, image_height)) {
+    // Load normal texture - use separate buffer  
+    if (BMP_Read("lion-normal.bmp", &normal_data, normal_width, normal_height) && normal_data != nullptr) {
         glGenTextures(1, &normalTexture_id);
         glBindTexture(GL_TEXTURE_2D, normalTexture_id);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, image_width, image_height, 0, GL_RGB, GL_UNSIGNED_BYTE, image_data);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, normal_width, normal_height, 0, GL_RGB, GL_UNSIGNED_BYTE, normal_data);
         glGenerateMipmap(GL_TEXTURE_2D);
+        
+        // CRITICAL: Force completion before proceeding
+        glFinish();
+        
+        // Check for OpenGL errors after texture creation
+        if (!checkGLError("Normal texture creation")) {
+            std::cerr << "ERROR: Failed to create normal texture" << std::endl;
+            return;
+        }
+        
         std::cout << "Loaded normal texture" << std::endl;
     }
+    
+    std::cout << "Texture loading complete - all buffers properly isolated" << std::endl;
 }
 
 static void initShaders() {
@@ -629,10 +668,18 @@ static void cleanupResources() {
         VAO = 0;
     }
     
-    // Clean up image data
-    if (image_data) {
-        delete[] image_data;
-        image_data = nullptr;
+    // Clean up image data - each buffer separately to prevent heap corruption
+    if (diffuse_data) {
+        delete[] diffuse_data;
+        diffuse_data = nullptr;
+    }
+    if (bump_data) {
+        delete[] bump_data;
+        bump_data = nullptr;
+    }
+    if (normal_data) {
+        delete[] normal_data;
+        normal_data = nullptr;
     }
     
     std::cout << "Resource cleanup complete!" << std::endl;
